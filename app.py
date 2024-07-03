@@ -17,7 +17,7 @@ def index():
 @app.route('/scrape', methods=['POST'])
 def scrape():
     query = request.form['query']
-    url = f"https://unsplash.com/s/photos/"+query
+    url = f"https://unsplash.com/s/photos/" + query.replace(' ','')
     response = requests.get(url)
     try:
         if response.status_code == 200:

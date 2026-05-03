@@ -1,8 +1,9 @@
 from flask import Flask, request, render_template, jsonify, send_from_directory, url_for
 import requests
-from bs4 import BeautifulSoup
 import os
+from dotenv import load_dotenv
 
+load_dotenv()
 app = Flask(__name__)
 
 # Create a directory to save images
@@ -10,31 +11,86 @@ save_dir = 'C:/Images'
 if not os.path.exists(save_dir):
     os.makedirs(save_dir)
 
+# Unsplash API Configuration
+UNSPLASH_API_KEY = os.getenv('UNSPLASH_ACCESS_KEY')
+if not UNSPLASH_API_KEY:
+    raise ValueError('UNSPLASH_ACCESS_KEY environment variable is not set. Please add it to your .env file.')
+
+# Strip any quotes if present (defensive programming)
+UNSPLASH_API_KEY = UNSPLASH_API_KEY.strip('\'"')
+
+UNSPLASH_API_BASE = 'https://api.unsplash.com/search/photos'
+
 @app.route('/')
 def index():
     return render_template('index.html')
 
 @app.route('/scrape', methods=['POST'])
 def scrape():
-    query = request.form['query']
-    url = f"https://unsplash.com/s/photos/" + query.replace(' ','')
-    response = requests.get(url)
+    query = request.form.get('query', '').strip()
+    
+    if not query:
+        return 'Please enter a search query.'
+    
     try:
-        if response.status_code == 200:
-            soup = BeautifulSoup(response.content,'html.parser')
-            image_data = soup.find_all('img',attrs={'class':"ApbSI"})
-            image_urls = []
-            for i in image_data[20:-11]:
-                image_url = i.get('src')
-                image_d = requests.get(image_url).content
-                with open(os.path.join(save_dir , f"{query}_{image_data.index(i)}.jpg") , "wb") as f:
+        # Call Unsplash API
+        params = {
+            'query': query,
+            'client_id': UNSPLASH_API_KEY,
+            'per_page': 30,
+            'order_by': 'relevant'
+        }
+        
+        response = requests.get(UNSPLASH_API_BASE, params=params, timeout=10)
+        
+        if response.status_code != 200:
+            error_detail = ''
+            try:
+                error_data = response.json()
+                if 'errors' in error_data:
+                    error_detail = f" Error: {error_data['errors'][0]}"
+            except:
+                pass
+            return f'Failed to retrieve images from Unsplash (Status: {response.status_code}).{error_detail} Please verify your API key is correct and active.'
+        
+        data = response.json()
+        
+        if 'results' not in data or len(data['results']) == 0:
+            return 'No images found for this query. Please try a different search term.'
+        
+        image_urls = []
+        
+        # Download and save images from API results
+        for idx, photo in enumerate(data['results']):
+            try:
+                # Get the regular size image URL
+                image_url = photo['urls']['regular']
+                
+                if not image_url or not isinstance(image_url, str):
+                    continue
+                
+                # Download the image
+                image_d = requests.get(image_url, timeout=10).content
+                filename = f"{query.replace(' ', '_')}_{len(image_urls) + 1}.jpg"
+                filepath = os.path.join(save_dir, filename)
+                with open(filepath, 'wb') as f:
                     f.write(image_d)
-                image_urls.append(url_for('download_image', filename=f"{query}_{image_data.index(i)}.jpg"))
-            return render_template('download.html', image_urls=image_urls)
-        else:
-            return 'Failed to retrieve images from Unsplash'
+                image_urls.append(url_for('download_image', filename=filename))
+            except Exception as e:
+                # Skip this image and continue
+                continue
+        
+        if not image_urls:
+            return 'Failed to download images. Please try again.'
+        
+        return render_template('download.html', image_urls=image_urls, query = query)
+        
+    except requests.RequestException as e:
+        return f'Network error: Unable to reach Unsplash. Details: {str(e)}'
+    except ValueError as e:
+        return f'Configuration error: {str(e)}'
     except Exception as e:
-        return 'Some internal error has occurred: ' + str(e)
+        return f'An error occurred: {str(e)}'
 
 @app.route('/download/<filename>')
 def download_image(filename):
